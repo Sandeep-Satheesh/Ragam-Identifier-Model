@@ -1,0 +1,7 @@
+#VSCode GitIgnore
+**/.vscode
+.python-version
+**/__pycache__/
+
+#Input files directory
+raw/*

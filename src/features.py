@@ -3,11 +3,12 @@ import torchcrepe
 import torch
 import torch.nn.functional as F
 import logging
-from collections import Counter
+from collections import OrderedDict
 import sounddevice as sd
-from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score
-from collections import Counter
+from . import constants as const
+from . import util
+from scipy.ndimage import gaussian_filter1d
+from scipy.stats import circmean
 
 logging.basicConfig(
     level=logging.INFO,
@@ -16,62 +17,98 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-fmin = 100  # Hz, adapt for your singer
-fmax = 400  # Hz, adapt for your singer
+def torch_medfilt(x, kernel_size=5):
+    # x: (1, time) 2D tensor
+    pad = kernel_size // 2
+    x_padded = F.pad(x.unsqueeze(0), (pad, pad), mode="reflect")
+    # Unfold into sliding windows
+    x_unfold = x_padded.unfold(dimension=2, size=kernel_size, step=1)  # (1, 1, time, k)
+    # Take median along the window dimension
+    x_med, _ = x_unfold.median(dim=-1)
+    return x_med.view(-1)
 
-def torch_moving_average(x, window=5):
-    # x: (time,) 1D tensor
-    kernel = torch.ones(1, 1, window, device=x.device) / window
-    x_smooth = F.conv1d(x, kernel, padding=window//2)
-    return x_smooth  # back to (time,)
-
-def extract_pitch(y, sr):
+def extract_pitch(y, sr, hop_length : int = const.HOP_LENGTH):
     logger.info("\t--> Extracting pitch frequencies in the audio sample...")
     y = torch.tensor(y).unsqueeze(0).to("cuda")
 
-    hop_length = 80  # 10 ms hop length
     freqs, harmonicity = torchcrepe.predict(
-        y,sr,hop_length,fmin,fmax,
+        y,sr,hop_length,const.FMIN_HZ,const.FMAX_HZ,
         model='full',   # 'full' = higher accuracy, 'tiny' = faster
-        batch_size=128,device="cuda",return_harmonicity=True
+        decoder=torchcrepe.decode.weighted_argmax,
+        batch_size=const.AUDIO_BATCH_SIZE,device="cuda",return_harmonicity=True
     )
-
-    smoothed_pitch = torch_moving_average(freqs, window=3)
+    
+    smoothed_pitch = torch_medfilt(freqs, kernel_size=const.TORCH_MEDFILT_KERNEL_SIZE)
     
     return smoothed_pitch, harmonicity
 
-def predict_sa_frequency(f0):
+def predict_sa_frequency(f0, conf, fmin=const.FMIN_HZ, fmax=const.FMAX_HZ, bins=const.HISTOGRAM_BINS_SA_ESTIMATION, smooth_sigma=1.0):
     logger.info("\t--> Predicting Sa frequency...")
     # f0 = your smoothed pitch array (Hz)
-    f0 = f0.cpu().numpy() if isinstance(f0, torch.Tensor) else np.array(f0)
-    f0 = f0[f0 > 0]    # remove unvoiced
+    f0 = util.convert_to_numpy_cpu(f0)
+    conf = util.convert_to_numpy_cpu(conf)
+
+    f0 = f0[(f0 > 0)]
+    if f0.size == 0:
+        return None
+
+    # range filter
+    mask = (f0 >= fmin) & (f0 <= fmax)
+    f0 = f0[mask]
+    if conf is not None:
+        conf = np.asarray(conf).reshape(-1)[mask]
+    else:
+        conf = np.ones_like(f0)
+
+    if f0.size == 0:
+        return None
+
+    # log2 and fold to 0..1
+    logf = np.log2(f0)
+    folded = np.mod(logf, 1.0)  # values in [0,1)
+
+    # weighted histogram
+    hist, edges = np.histogram(folded, bins=bins, range=(0.0, 1.0), weights=conf)
+    hist_smooth = gaussian_filter1d(hist.astype(float), sigma=smooth_sigma)
+
+    peak = np.argmax(hist_smooth)
+    folded_center = 0.5 * (edges[peak] + edges[peak+1])
+
+    # Map back to a real octave near the median logf
+    median_oct = int(np.round(np.median(logf)))
+    sa_log = folded_center + median_oct
+    sa_freq = 2.0 ** sa_log
+
+    # As fallback use circular mean if histogram is flat
+    if hist_smooth.max() < 1e-6:
+        circ = circmean(2*np.pi*folded, high=2*np.pi) / (2*np.pi)
+        folded_center = circ % 1.0
+        sa_log = folded_center + median_oct
+        sa_freq = 2.0 ** sa_log
     
-    pitch_mask = (f0 >= fmin) & (f0 <= fmax)
-    f0[~pitch_mask] = np.nan
-    f0 = f0[~np.isnan(f0)]  # remove frequencies outside range
-    log_f0 = np.log2(f0)  # convert to log2 scale (octaves)
-
-    logger.info("\t--> Building frequency histogram...")
-    # fold into 1 octave around middle C (~261 Hz) or any ref
-    folded = (log_f0 % 1.0)  # keep only fractional part (within one octave)
-
-    hist, bin_edges = np.histogram(folded, bins=120)
-    peak_bin = np.argmax(hist)
-    sa_folded = 0.5 * (bin_edges[peak_bin] + bin_edges[peak_bin+1])
-
-    # map back to actual tonic near median pitch
-    median_octave = int(np.median(log_f0))
-    sa_log = sa_folded + median_octave
-    sa_freq = 2 ** sa_log
+    # Clamp to expected range
+    while sa_freq < const.EXPECTED_SA_RANGE_HZ[0]:
+        sa_freq *= 2.0
     
-    return sa_freq
+    while sa_freq > const.EXPECTED_SA_RANGE_HZ[1]:
+        sa_freq /= 2.0
 
-def build_swara_map(sa_freq: float, octaves=[0,1]):
+    return float(sa_freq)
+
+
+def build_swara_map(sa_freq: float, octaves=(-1,0,1)):
     """
     Build a swara map around a given Sa (tonic) frequency using 12-TET.
-    Each octave is labeled explicitly: Sa2, Ri1, Ri2, etc.
+    Each octave is labeled explicitly: Sa_o0, Ri1_o0, Ga2_o1, etc.
+    
+    Args:
+        sa_freq: tonic frequency in Hz
+        octaves: list/tuple of octave indices (0 = tonic's base octave)
+    
+    Returns:
+        dict mapping swara label with octave to frequency in Hz
     """
-    # Swara offsets in semitones from Sa
+    # Swara offsets in semitones from Sa (12-TET)
     swaras = [
         ("Sa", 0),
         ("Ri1", 1), ("Ri2", 2),
@@ -82,96 +119,71 @@ def build_swara_map(sa_freq: float, octaves=[0,1]):
         ("Ni1", 10), ("Ni2", 11),
     ]
     
-    swara_map = {}
+    swara_map = OrderedDict()
     
-    for label, semitone in swaras:
-        freq = sa_freq * (2 ** (semitone / 12))
-        swara_map[f"{label}"] = freq
+    for o in octaves:
+        for label, semitone in swaras:
+            freq = sa_freq * (2 ** ((semitone + 12*o) / 12))
+            swara_map[f"{label}_o{o}"] = freq
     
-    swara_map['Sa\''] = sa_freq * 2
     return swara_map
 
-def map_pitch_to_swaras_clustered(
-    pitch_contour: np.ndarray,
+def map_pitch_to_swaras_direct(
+    f0: np.ndarray,
+    sa_hz: float,
     swara_map: dict,
-    min_frames_ratio: float = 0.02,
-    merge_cents: float = 30.0,
-    k_range=(5, 9),
+    confidence: np.ndarray = None,
+    tolerance_cents: float = const.SWARA_MAPPING_TOLERANCE_CENTS,
+    conf_thresh: float = const.SWARA_MAPPING_CONFIDENCE_THRESHOLD,
 ):
     """
-    Cluster pitch contour using a music-aware heuristic for number of swaras.
-    Returns swara_counter and confidence.
+    Map each f0 frame to nearest swara (with octave) if within tolerance.
+    Uses confidence from torchcrepe to mask low-confidence frames.
+
+    Args:
+        f0: (N,) or (1,N) array of frequencies in Hz
+        sa_hz: tonic frequency
+        swara_map: dict {swara_name: frequency in Hz}
+        confidence: (N,) array of torchcrepe confidence scores [0,1]
+        tolerance_cents: max deviation from swara center
+        conf_thresh: minimum confidence to accept mapping
+
+    Returns:
+        list of swara labels (length N), 'uncertain' for unvoiced/low-conf/out-of-tolerance
     """
+    # flatten
+    f0 = np.asarray(f0).reshape(-1)
 
-    def freq_to_cents(f1, f2):
-        return 1200 * np.log2(f1 / f2)
+    # optional confidence mask
+    if confidence is None:
+        confidence = np.ones_like(f0)
+    else:
+        confidence = np.asarray(confidence).reshape(-1)
 
-    # Remove zeros
-    pitch_contour = pitch_contour[pitch_contour > 0]
-    if len(pitch_contour) == 0:
-        return Counter(), {}
-
-    log_pitch = np.log2(pitch_contour).reshape(-1, 1)
-    best_k = None
-    best_score = -np.inf
-    best_labels = None
-    best_centroids = None
-    total_frames = len(pitch_contour)
-
-    # --- Heuristic loop ---
-    for k in range(k_range[0], k_range[1]+1):
-        kmeans = KMeans(n_clusters=k, n_init=50, max_iter=500, random_state=42).fit(log_pitch)
-        labels = kmeans.labels_
-        centroids = 2 ** kmeans.cluster_centers_.flatten()
-        cluster_counts = np.array([np.sum(labels == i) for i in range(k)])
-        # Filter tiny clusters
-        valid_idx = cluster_counts / total_frames >= min_frames_ratio
-        cluster_counts = cluster_counts[valid_idx]
-        centroids = centroids[valid_idx]
-        # Merge close clusters
-        merged = []
-        merged_counts = []
-        used = np.zeros(len(centroids), dtype=bool)
-        for i, c in enumerate(centroids):
-            if used[i]:
-                continue
-            group = [i]
-            for j, c2 in enumerate(centroids):
-                if i != j and not used[j]:
-                    if abs(freq_to_cents(c, c2)) < merge_cents:
-                        group.append(j)
-            merged_freq = np.average(centroids[group], weights=cluster_counts[group])
-            merged_count = np.sum(cluster_counts[group])
-            merged.append(merged_freq)
-            merged_counts.append(merged_count)
-            for g in group:
-                used[g] = True
-        merged = np.array(merged)
-        merged_counts = np.array(merged_counts)
-
-        # Compute heuristic score: total frames / (number of clusters)^0.5
-        coverage = np.sum(merged_counts) / total_frames
-        score = coverage / np.sqrt(len(merged))
-        if score > best_score:
-            best_score = score
-            best_k = k
-            best_centroids = merged
-            best_labels = merged_counts
-
-    # --- Map centroids to swaras ---
+    # swara centers in semitones relative to Sa
     swara_names = list(swara_map.keys())
-    swara_freqs = np.array(list(swara_map.values()))
+    swara_vals = np.array(list(swara_map.values()))
+    swara_vals_st = 12 * np.log2(swara_vals / sa_hz)
 
-    swara_counter = Counter()
-    swara_confidence = {}
-    for c, count in zip(best_centroids, best_labels):
-        cents_diff = np.abs([freq_to_cents(c, f) for f in swara_freqs])
-        min_idx = np.argmin(cents_diff)
-        swara_name = swara_names[min_idx]
-        swara_counter[swara_name] += count
-        swara_confidence[swara_name] = swara_confidence.get(swara_name, 0) + count / total_frames
+    # f0 -> semitones wrt Sa
+    valid = (f0 > 0) & np.isfinite(f0) & (confidence >= conf_thresh)
+    st = np.full_like(f0, np.nan, dtype=float)
+    st[valid] = 12 * np.log2(f0[valid] / sa_hz)
 
-    return swara_counter, swara_confidence
+    labels = []
+    for val, is_ok in zip(st, valid):
+        if not is_ok:
+            labels.append("lowconf")
+            continue
+        cents_dist = 100 * np.abs(swara_vals_st - val)  # distances in cents
+        idx = np.argmin(cents_dist)
+        if cents_dist[idx] <= tolerance_cents:
+            labels.append(swara_names[idx])
+        else:
+            labels.append("irregular_pitch")
+
+    return labels
+
 
 def play_sine_tone(frequency, duration, samplerate=44100, amplitude=1):
     """
@@ -191,23 +203,22 @@ def play_sine_tone(frequency, duration, samplerate=44100, amplitude=1):
     sd.play(sine_wave, samplerate)
     sd.wait()
 
-def swara_counter(smooth_pitch: torch.Tensor, confidence: torch.Tensor, sa_freq: float) -> dict:
+def get_swaras_for_frames(smooth_pitch: torch.Tensor, confidence: torch.Tensor, sa_freq: float) -> dict:
     """
-    Filter low-confidence frames, map to swaras, and count.
+    Map each frame's pitch to swaras using the detected Sa frequency.
     """
 
     # --- numpy conversion ---
-    smooth_pitch = smooth_pitch.cpu().numpy() if isinstance(smooth_pitch, torch.Tensor) else np.array(smooth_pitch)
-    confidence = confidence.cpu().numpy() if isinstance(confidence, torch.Tensor) else np.array(confidence)
+    smooth_pitch = util.convert_to_numpy_cpu(smooth_pitch)
+    confidence = util.convert_to_numpy_cpu(confidence)
 
     # --- map to swaras ---
     swara_map = build_swara_map(sa_freq)
-    swara_seq, swara_confidence = map_pitch_to_swaras_clustered(smooth_pitch, swara_map)
+    swara_seq = map_pitch_to_swaras_direct(smooth_pitch, sa_freq, swara_map, confidence)
+    
+    # for s in swara_map:
+    #     if s in swara_seq.keys():
+    #         print('Playing swara:', s)
+    #         play_sine_tone(swara_map[s], 2)
 
-    for s in swara_map:
-        if s in swara_seq.keys():
-            print('Playing swara:', s)
-            play_sine_tone(swara_map[s], 1)
-    # --- aggregate counts ---
-    print(swara_confidence)
-    return swara_seq
+    return swara_seq, swara_map

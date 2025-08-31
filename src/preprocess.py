@@ -6,6 +6,7 @@ import logging
 import librosa
 import numpy as np
 from urllib.parse import urlparse, parse_qs
+from . import constants as const
 
 # Setup logger
 logging.basicConfig(
@@ -47,19 +48,28 @@ def download_audio_from_youtube(url, output_dir):
         sys.exit(1)
     return temp_file
 
-def load_vocals_track(track_path, duration=10, offset=0):
+def load_vocals_track(track_path, duration, offset):
     logger.info(f"\t--> Loading {duration} seconds from the sample starting from offset {offset} seconds, into memory...")
     y, sr = librosa.load(track_path, sr=None, mono=True, duration=duration, offset=offset)  # Load first 'duration' seconds
-    logger.info(f"\t--> Resampling at 16 kHz and trimming silence...")
+    logger.info(f"\t--> Resampling at {const.SAMPLE_RATE / 1000} kHz...")
     y = y / np.max(np.abs(y))
-    y = librosa.resample(y, orig_sr=sr, target_sr=16000)  # Resample to 16 kHz
-    #Trim leading and trailing silence
-    y, _ = librosa.effects.trim(y)  # top_db can be tuned
+    y = librosa.resample(y, orig_sr=sr, target_sr=const.SAMPLE_RATE)  # Resample to 16 kHz
 
-    return y, 16000
+    #Trim silence
+    logger.info(f"\t--> Trimming silence lower than {const.AUDIO_TOP_DB} dB from peak...")
+    y, _ = librosa.effects.trim(y, top_db=const.AUDIO_TOP_DB)  # top_db can be tuned
+    intervals = librosa.effects.split(y, top_db=const.AUDIO_TOP_DB)  # adjust top_db (20–40) to tune sensitivity
+
+    # Concatenate the kept regions
+    non_silent_audio = np.concatenate([y[start:end] for start, end in intervals])
+
+    # logger.info(f"\t--> Generating Mel spectogram...")
+    # mel = librosa.feature.melspectrogram(y, sr=16000, n_mels=128, hop_length=160)
+    # mel = librosa.power_to_db(mel).T   # (T, n_mels)
+    return non_silent_audio, const.SAMPLE_RATE
     
 
-def preprocess(input_path, output_dir, desired_duration=10, offset=0):
+def preprocess(input_path, output_dir, desired_duration=const.AUDIO_LENGTH_SEC, offset=const.AUDIO_OFFSET_SEC):
     try:
         logger.info("\t--> Sourcing raw audio...")
         src_file_path = download_audio_from_youtube(input_path, output_dir)

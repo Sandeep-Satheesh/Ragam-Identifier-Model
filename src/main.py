@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 def start_ragam_identification(args):
     logger.info("1. Preprocessing input...")
-    y, sr = pre.preprocess(args.input, args.output, desired_duration=60, offset=0)
+    y, sr = pre.preprocess(args.input, args.output, desired_duration=90, offset=0)
 
     logger.info("2. Finding the fundamental frequency (Sa frequency) for the sample...")
     f0_pitch, confidence = feat.extract_pitch(y, sr)

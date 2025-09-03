@@ -40,31 +40,26 @@ class RagamCRNN(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.fc = nn.Linear(rnn_hidden * 2, num_classes)
 
-    def forward(self, x):
-        """
-        x: (B, 1, T) → pitch contour snippet
-        """
-        # CNN: (B,1,T) → (B,128,T')
-        out = self.conv_block(x)
+    def forward(self, x, return_attention=False):
+        # --- CNN feature extraction ---
+        out = self.conv_block(x)       # (B, C, T)
 
-        # Prepare for RNN: (B,128,T') → (B,T',128)
-        out = out.permute(0, 2, 1)
-
-        # BiLSTM: (B,T',2*hidden)
-        out, _ = self.rnn(out)
+        # --- BiLSTM expects (B, T, C) ---
+        out = out.permute(0, 2, 1)     # (B, T, C)
+        out, _ = self.rnn(out)         # (B, T, H*2)
 
         # --- Pooling ---
-        if self.pooling == "mean":
-            out = out.mean(dim=1)  # average pooling
+        if self.pooling == "attention":
+            attn_scores = self.attn(out)                 # (B, T, 1)
+            attn_weights = torch.softmax(attn_scores, dim=1)  # (B, T, 1)
+            out = torch.sum(out * attn_weights, dim=1)        # (B, H*2)
+            if return_attention:
+                return self.fc(self.dropout(out)), attn_weights.squeeze(-1)  # (B, num_classes), (B, T)
+        elif self.pooling == "avg":
+            out = out.mean(dim=1)
         elif self.pooling == "max":
-            out = out.max(dim=1).values  # max pooling
-        elif self.pooling == "attention":
-            attn_weights = torch.softmax(self.attn(out).squeeze(-1), dim=1)  # (B,T')
-            out = torch.sum(out * attn_weights.unsqueeze(-1), dim=1)  # weighted sum
-        else:
-            raise ValueError(f"Unknown pooling type: {self.pooling}")
+            out, _ = out.max(dim=1)
 
         # --- Classifier ---
         out = self.dropout(out)
-        out = self.fc(out)
-        return out
+        return self.fc(out)

@@ -78,9 +78,9 @@ if __name__ == "__main__":
 
     # Inference args
     infer_parser = subparsers.add_parser("infer")
-    infer_parser.add_argument("--model_path", type=str, required=True)
-    infer_parser.add_argument("--input", type=str, required=True)
-
+    infer_parser.add_argument("--input", type=str, help="Path to audio file or YouTube URL")
+    infer_parser.add_argument("--output", type=str, default='./raw/', help="Where separated stems go")
+    infer_parser.add_argument("--dataset_path", type=str, required=True)
     args = parser.parse_args()
 
     if args.mode == "train":
@@ -92,10 +92,6 @@ if __name__ == "__main__":
         main.start_training(args)
 
     elif args.mode == "infer":
-        print("Inference with", args.model_path, args.input_file)
-        parser.add_argument("--input", type=str, help="Path to audio file or YouTube URL")
-        parser.add_argument("--output", type=str, default='./raw/', help="Where separated stems go")
-        
         if not args.input:
             logger.error("Input path is required. Please provide an audio file or YouTube URL.")
             sys.exit(1)

@@ -5,6 +5,7 @@ import numpy as np
 import json
 import logging
 from tqdm import tqdm
+from src import constants
 
 logging.basicConfig(
     level=logging.INFO,
@@ -14,29 +15,21 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class CarnaticPitchDataset(Dataset):
-    def __init__(self, base_dir, snippet_seconds, overlap, downsample_factor, force_rebuild=False, convert_to_npy=True):
-        """
-        base_dir: path to 'Carnatic/' (with features/ and _info_/)
-        snippet_seconds: window size in seconds (default=45)
-        overlap: fraction overlap between windows (0=no overlap, 0.5=50% overlap)
-        downsample_factor: keep 1 frame every n frames (default=2)
-        force_rebuild: if True, ignore cached snippet index and rebuild
-        convert_to_npy: if True, check and convert text files to npy (much faster to read npy than txt files)
-        """
+    def __init__(self, base_dir, snippet_seconds, overlap, downsample_factor,
+                 force_rebuild=False, convert_to_npy=True, augment=False):
         self.base_dir = base_dir
         self.feat_dir = os.path.join(base_dir, "features")
         info_dir = os.path.join(base_dir, "_info_")
+        self.augment = augment
         self.index_cache = os.path.join(info_dir, "snippet_index.json")
 
         logger.info("\t--> Loading metadata files...")
 
-        # --- Load metadata files ---
         with open(os.path.join(info_dir, "path_mbid_ragaid.json")) as f:
             mbid_to_meta = json.load(f)
         with open(os.path.join(info_dir, "ragaId_to_ragaName_mapping.json")) as f:
             ragaid_to_name = json.load(f)
 
-        # --- Build metadata list ---
         logger.info("\t--> Building metadata for lookups...")
 
         self.metadata = []
@@ -46,16 +39,12 @@ class CarnaticPitchDataset(Dataset):
             raga_name = ragaid_to_name[str(meta["ragaid"])]
             self.metadata.append({"file": rel_path, "raga": raga_name})
 
-        # --- Build raga2idx ---
         raga_names = sorted({m["raga"] for m in self.metadata})
         self.raga2idx = {r: i for i, r in enumerate(raga_names)}
 
-        # --- Detect hop size from first file ---
         example_file = os.path.join(self.base_dir, self.metadata[0]["file"] + ".pitchSilIntrpPP")
         f0_data = np.loadtxt(example_file)
-        hop = np.mean(np.diff(f0_data[:,0]))  # seconds per frame
-
-        # Apply downsampling to hop size
+        hop = np.mean(np.diff(f0_data[:, 0]))
         hop *= downsample_factor
         self.downsample_factor = downsample_factor
 
@@ -64,7 +53,6 @@ class CarnaticPitchDataset(Dataset):
         logger.info(f"\t--> hop={hop:.4f}s (downsample={downsample_factor}) → "
                     f"snippet_frames={self.snippet_frames}, hop_frames={self.hop_frames}")
 
-        # --- Build or load snippet samples ---
         if os.path.exists(self.index_cache) and not force_rebuild:
             logger.info(f"\t--> Loading cached snippet index from {self.index_cache}")
             with open(self.index_cache, "r") as f:
@@ -77,7 +65,7 @@ class CarnaticPitchDataset(Dataset):
                 base_path = os.path.join(self.base_dir, m["file"])
                 pitch_file = base_path + ".pitchSilIntrpPP"
                 with open(pitch_file) as f:
-                    num_frames = sum(1 for _ in f) // downsample_factor  # adjusted for downsampling
+                    num_frames = sum(1 for _ in f) // downsample_factor
                     start = 0
                     while start + self.snippet_frames <= num_frames:
                         self.samples.append({
@@ -91,12 +79,10 @@ class CarnaticPitchDataset(Dataset):
                 json.dump(self.samples, f)
             logger.info(f"\t--> Built and cached {len(self.samples)} snippets.")
         
-        # --- Convert to .npy if requested ---
         if convert_to_npy:
             self._maybe_convert_to_npy()
 
     def _maybe_convert_to_npy(self):
-        """Convert pitchSilIntrpPP -> npy (freqs only) for faster loading"""
         logger.info("\t--> Checking for .npy cache files and converting if not available...")
         for s in tqdm(self.samples):
             base_path = os.path.join(self.base_dir, s["file"])
@@ -106,7 +92,7 @@ class CarnaticPitchDataset(Dataset):
             if not os.path.exists(pitch_npy):
                 try:
                     f0_data = np.loadtxt(pitch_txt)
-                    freqs = f0_data[:, 1]
+                    freqs = f0_data[:, 1].copy()
                     np.save(pitch_npy, freqs)
                 except Exception as e:
                     logger.warning(f"\t--> Failed to convert {pitch_txt}: {e}")
@@ -119,24 +105,26 @@ class CarnaticPitchDataset(Dataset):
         entry = self.samples[idx]
         base_path = os.path.join(self.base_dir, entry["file"])
 
-        # Load pitch + tonic
-        pitch_file = base_path + ".pitchSilIntrpPP"
-        tonic_file = base_path + ".tonicFine"
-
-        # Prefer .npy, fallback to .txt
         pitch_npy = base_path + ".freqs.npy"
         pitch_txt = base_path + ".pitchSilIntrpPP"
 
         if os.path.exists(pitch_npy):
-            freqs = np.load(pitch_npy, mmap_mode="r")
+            freqs = np.load(pitch_npy)
         else:
             f0_data = np.loadtxt(pitch_txt)
             freqs = f0_data[:, 1]
+
+        freqs = freqs.copy()
+
+        # --- Augmentation ---
+        if self.augment:
+            freqs = self.apply_augmentation(freqs)
 
         # --- Downsampling ---
         freqs = freqs[::self.downsample_factor]
 
         # Load tonic
+        tonic_file = base_path + ".tonicFine"
         tonic = float(open(tonic_file).read().strip())
 
         # Normalize to cents relative to tonic
@@ -144,11 +132,52 @@ class CarnaticPitchDataset(Dataset):
         valid = freqs > 0
         cents[valid] = 1200 * np.log2(freqs[valid] / tonic)
 
-        # Slice snippet
+        # --- Slice snippet ---
         start = entry["start"]
-        seq = cents[start:start+self.snippet_frames]
+        seq = cents[start:start + self.snippet_frames]
 
-        # Shape = (1, T) for Conv1d
-        x = torch.tensor(seq, dtype=torch.float32).unsqueeze(0)
+        # --- Guarantee fixed length ---
+        if len(seq) < self.snippet_frames:
+            seq = np.pad(seq, (0, self.snippet_frames - len(seq)), constant_values=-100.0)
+        elif len(seq) > self.snippet_frames:
+            seq = seq[:self.snippet_frames]
+
+        # Final safety: enforce float32 + contiguous memory
+        seq = np.ascontiguousarray(seq, dtype=np.float32)
+
+        # Shape = (1, T)
+        x = torch.from_numpy(seq).unsqueeze(0).clone()
         y = self.raga2idx[entry["raga"]]
         return x, y
+
+    def apply_augmentation(self, freqs):
+        """Apply random combination of tonic shift, tempo stretch, and noise.
+        Ensures output length = self.snippet_frames.
+        """
+
+        # --- Tonic shift (Hz scaling) ---
+        if np.random.rand() < constants.AUGMENT_PROBS["tonic_shift"]:
+            shift_cents = np.random.uniform(-constants.AUGMENT_RANGES["tonic_shift"],
+                                            constants.AUGMENT_RANGES["tonic_shift"])
+            factor = 2 ** (shift_cents / 1200)  # cents → multiplicative factor
+            freqs = freqs * factor
+
+        # --- Tempo stretch (time-warp with fixed output length) ---
+        if np.random.rand() < constants.AUGMENT_PROBS["tempo"]:
+            stretch = np.random.uniform(1 - constants.AUGMENT_RANGES["tempo"],
+                                        1 + constants.AUGMENT_RANGES["tempo"])
+            # target timeline (fixed length)
+            idx = np.linspace(0, len(freqs) - 1, self.snippet_frames)
+            # warp timeline by dividing by stretch
+            warped_idx = idx / stretch
+            # clip to valid range
+            warped_idx = np.clip(warped_idx, 0, len(freqs) - 1)
+            freqs = np.interp(warped_idx, np.arange(len(freqs)), freqs)
+
+        # --- Noise injection (still in Hz) ---
+        if np.random.rand() < constants.AUGMENT_PROBS["noise"]:
+            noise_cents = np.random.normal(0, constants.AUGMENT_RANGES["noise"], size=freqs.shape)
+            freqs = freqs * (2 ** (noise_cents / 1200))
+
+        # --- Ensure clean contiguous float32 array ---
+        return np.ascontiguousarray(freqs, dtype=np.float32).copy()

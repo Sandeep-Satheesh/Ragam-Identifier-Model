@@ -7,13 +7,28 @@ TRAIN_BATCH_SIZE = 128
 TRAIN_SNIPPET_SECONDS = 45
 TRAIN_SNIPPET_OVERLAP_FACTOR = 0.5
 TENSORBOARD_LOG_DIR = "runs/tensorboard_logs"
-CHECKPOINT_DIR_PATH = "checkpoints"
+CHECKPOINT_DIR_PATH = "runs/checkpoints"
+RESUME_TRAINING = True
+EARLY_STOPPING_PATIENCE = 30
 CHECKPOINT_FILE_NAME = "ragam_crnn.pth"
 TRAIN_SNIPPET_DOWNSAMPLE_FACTOR = 2
 TRAINING_LOG_FILE_PATH = "runs/training_logs.txt"
+CHECKPOINT_INTERVAL = 10
+# Augmentation config
+AUGMENT_PROBS = {
+    "tonic_shift": 0.5,   # 50% chance
+    "tempo": 0.3,         # 30% chance
+    "noise": 0.3          # 30% chance
+}
+AUGMENT_RANGES = {
+    "tonic_shift": 250,
+    "tempo": 0.25,
+    "noise": 10 #cents
+}
+
 #Inference configs
 
-HOP_LENGTH = 40  # 2.5 ms hop length @ 16kHz
+HOP_LENGTH = 128  # 8 ms hop length @ 16kHz
 FMIN_HZ = 70
 FMAX_HZ = 1200
 AUDIO_LATENCY_SEC = 0.625   # adjust by ear

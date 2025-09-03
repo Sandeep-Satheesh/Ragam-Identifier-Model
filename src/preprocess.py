@@ -21,7 +21,8 @@ def download_audio_from_youtube(url, output_dir):
     parsed_url = urlparse(url)
     query_parameters = parse_qs(parsed_url.query)
     video_id = query_parameters.get('v', [''])[0]  # Get 'name' and default to empty string if not found
-
+    url = 'https://' + parsed_url.netloc + '?v=' + video_id
+    
     temp_file = os.path.join(output_dir, video_id + ".wav")
     
     if os.path.exists(temp_file):

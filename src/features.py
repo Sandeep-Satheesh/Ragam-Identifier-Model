@@ -35,7 +35,7 @@ def extract_pitch(y, sr, hop_length : int = const.HOP_LENGTH):
         y,sr,hop_length,const.FMIN_HZ,const.FMAX_HZ,
         model='full',   # 'full' = higher accuracy, 'tiny' = faster
         decoder=torchcrepe.decode.weighted_argmax,
-        batch_size=const.AUDIO_BATCH_SIZE,device="cuda",return_harmonicity=True
+        batch_size=const.AUDIO_BATCH_SIZE,device="cuda",return_harmonicity=True,pad=True
     )
     
     smoothed_pitch = torch_medfilt(freqs, kernel_size=const.TORCH_MEDFILT_KERNEL_SIZE)

@@ -1,3 +1,17 @@
+#Training configs
+
+POOLING_METHOD = 'attention' #'attention', 'average', 'max'
+TRAIN_EPOCHS = 100
+LEARNING_RATE = 0.001
+TRAIN_BATCH_SIZE = 128
+TRAIN_SNIPPET_SECONDS = 45
+TRAIN_SNIPPET_OVERLAP_FACTOR = 0.5
+TENSORBOARD_LOG_DIR = "runs/tensorboard_logs"
+CHECKPOINT_DIR_PATH = "checkpoints"
+CHECKPOINT_FILE_NAME = "ragam_crnn.pth"
+
+#Inference configs
+
 HOP_LENGTH = 40  # 2.5 ms hop length @ 16kHz
 FMIN_HZ = 70
 FMAX_HZ = 1200

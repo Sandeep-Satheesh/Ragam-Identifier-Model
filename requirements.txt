@@ -3,6 +3,7 @@ torch==2.5.1+cu121        # GPU-enabled PyTorch (CUDA 12.1 build)
 torchaudio==2.5.1+cu121
 torchvision==0.20.1+cu121
 torchcrepe==0.0.24
+tensorboard==2.20.0
 
 # Audio processing
 ffmpeg-python==0.2.0

@@ -9,7 +9,8 @@ TRAIN_SNIPPET_OVERLAP_FACTOR = 0.5
 TENSORBOARD_LOG_DIR = "runs/tensorboard_logs"
 CHECKPOINT_DIR_PATH = "checkpoints"
 CHECKPOINT_FILE_NAME = "ragam_crnn.pth"
-
+TRAIN_SNIPPET_DOWNSAMPLE_FACTOR = 2
+TRAINING_LOG_FILE_PATH = "runs/training_logs.txt"
 #Inference configs
 
 HOP_LENGTH = 40  # 2.5 ms hop length @ 16kHz

@@ -8,6 +8,7 @@ from sklearn.metrics import confusion_matrix
 import matplotlib.pyplot as plt
 import numpy as np
 import logging
+from tqdm import tqdm 
 
 from .dataset import CarnaticPitchDataset
 from .model import RagamCRNN
@@ -50,11 +51,16 @@ class RagamTrainer:
         self.writer = SummaryWriter(log_dir=constants.TENSORBOARD_LOG_DIR)
 
     def train(self):
-        for epoch in range(self.epochs):
+        epoch_pbar = tqdm(range(self.epochs), position=0)
+        for epoch in epoch_pbar:
             # --- Train ---
             self.model.train()
             train_loss, correct, total = 0, 0, 0
-            for xb, yb in self.train_loader:
+            epoch_pbar.set_description(f"Epoch [{epoch+1}/{self.epochs}]")
+
+            step_pbar = tqdm(enumerate(self.train_loader, start=1), total=len(self.train_loader), position=1, leave=False)
+
+            for step, (xb, yb) in step_pbar:
                 xb, yb = xb.to(self.device), yb.to(self.device)
 
                 self.optimizer.zero_grad()
@@ -67,6 +73,13 @@ class RagamTrainer:
                 _, pred = out.max(1)
                 correct += (pred == yb).sum().item()
                 total += yb.size(0)
+
+                step_pbar.set_description(
+                    f"Step [{step}/{len(self.train_loader)}] "
+                    f"Loss={loss.item():.4f}"
+                )
+
+                self.writer.add_scalar("Loss/step", loss.item(), epoch * len(self.train_loader) + step)
 
             train_acc = correct / total
             avg_train_loss = train_loss / len(self.train_loader)
@@ -93,10 +106,10 @@ class RagamTrainer:
             avg_val_loss = val_loss / len(self.val_loader)
 
             # Logging
-            print(f"Epoch {epoch+1:02d}: "
+            print(f"\nEpoch {epoch+1:02d}: "
                   f"Train Loss={avg_train_loss:.4f}, Train Acc={train_acc:.4f}, "
                   f"Val Loss={avg_val_loss:.4f}, Val Acc={val_acc:.4f}")
-            print('-'*50)
+            print('-'*80)
 
             self.writer.add_scalar("Loss/train", avg_train_loss, epoch+1)
             self.writer.add_scalar("Loss/val", avg_val_loss, epoch+1)

@@ -72,6 +72,7 @@ if __name__ == "__main__":
     train_parser.add_argument("--batch_size", type=int, default=constants.TRAIN_BATCH_SIZE)
     train_parser.add_argument("--snippet_seconds", type=int, default=constants.TRAIN_SNIPPET_SECONDS)
     train_parser.add_argument("--snippet_overlap_factor", type=float, default=constants.TRAIN_SNIPPET_OVERLAP_FACTOR)
+    train_parser.add_argument("--snippet_downsample_factor", type=float, default=constants.TRAIN_SNIPPET_DOWNSAMPLE_FACTOR)
     train_parser.add_argument("--pooling_method", type=str, default=constants.POOLING_METHOD)
     train_parser.add_argument("--dataset_path", type=str, required=True)
 

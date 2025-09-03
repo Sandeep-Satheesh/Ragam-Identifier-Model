@@ -3,7 +3,6 @@ import logging
 from collections import Counter
 from . import visualizer
 from src.crnn import dataset, train
-from torch.utils.data import DataLoader
 
 logging.basicConfig(
     level=logging.INFO,
@@ -14,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 def start_training(args):
     logger.info("1. Preparing dataset...")
-    ds = dataset.CarnaticPitchDataset(args.dataset_path, snippet_seconds=args.snippet_seconds, overlap=args.snippet_overlap_factor)
+    ds = dataset.CarnaticPitchDataset(args.dataset_path, snippet_seconds=args.snippet_seconds, overlap=args.snippet_overlap_factor, downsample_factor=args.snippet_downsample_factor)
     logger.info(f"\t--> OUTPUT: Total snippets: {len(ds)}")
     x, y = ds[0]
     logger.info(f"\t--> OUTPUT: Snippet shape: {x.shape}, Label id: {y}")

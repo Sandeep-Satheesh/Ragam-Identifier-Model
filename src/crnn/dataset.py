@@ -4,6 +4,7 @@ from torch.utils.data import Dataset
 import numpy as np
 import json
 import logging
+from tqdm import tqdm
 
 logging.basicConfig(
     level=logging.INFO,
@@ -13,16 +14,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class CarnaticPitchDataset(Dataset):
-    def __init__(self, base_dir, snippet_seconds=45.0, overlap=0.5, downsample_factor=2):
+    def __init__(self, base_dir, snippet_seconds, overlap, downsample_factor, force_rebuild=False, convert_to_npy=True):
         """
         base_dir: path to 'Carnatic/' (with features/ and _info_/)
         snippet_seconds: window size in seconds (default=45)
         overlap: fraction overlap between windows (0=no overlap, 0.5=50% overlap)
         downsample_factor: keep 1 frame every n frames (default=2)
+        force_rebuild: if True, ignore cached snippet index and rebuild
+        convert_to_npy: if True, check and convert text files to npy (much faster to read npy than txt files)
         """
         self.base_dir = base_dir
         self.feat_dir = os.path.join(base_dir, "features")
         info_dir = os.path.join(base_dir, "_info_")
+        self.index_cache = os.path.join(info_dir, "snippet_index.json")
 
         logger.info("\t--> Loading metadata files...")
 
@@ -58,25 +62,55 @@ class CarnaticPitchDataset(Dataset):
         self.snippet_frames = int(snippet_seconds / hop)
         self.hop_frames = int(self.snippet_frames * (1 - overlap))
         logger.info(f"\t--> hop={hop:.4f}s (downsample={downsample_factor}) → "
-              f"snippet_frames={self.snippet_frames}, hop_frames={self.hop_frames}")
+                    f"snippet_frames={self.snippet_frames}, hop_frames={self.hop_frames}")
 
-        # --- Build list of snippet samples ---
-        logger.info(f"\t--> Building snippet samples of {snippet_seconds}s each...")
-        self.samples = []
-        for m in self.metadata:
-            base_path = os.path.join(self.base_dir, m["file"])
-            pitch_file = base_path + ".pitchSilIntrpPP"
-            f0_data = np.loadtxt(pitch_file)
-            num_frames = len(f0_data) // downsample_factor  # adjusted for downsampling
+        # --- Build or load snippet samples ---
+        if os.path.exists(self.index_cache) and not force_rebuild:
+            logger.info(f"\t--> Loading cached snippet index from {self.index_cache}")
+            with open(self.index_cache, "r") as f:
+                self.samples = json.load(f)
+            logger.info(f"\t--> Loaded {len(self.samples)} snippets from cache.")
+        else:
+            logger.info("\t--> Building snippet samples from scratch...")
+            self.samples = []
+            for m in self.metadata:
+                base_path = os.path.join(self.base_dir, m["file"])
+                pitch_file = base_path + ".pitchSilIntrpPP"
+                with open(pitch_file) as f:
+                    num_frames = sum(1 for _ in f) // downsample_factor  # adjusted for downsampling
+                    start = 0
+                    while start + self.snippet_frames <= num_frames:
+                        self.samples.append({
+                            "file": m["file"],
+                            "raga": m["raga"],
+                            "start": start
+                        })
+                        start += self.hop_frames
 
-            start = 0
-            while start + self.snippet_frames <= num_frames:
-                self.samples.append({
-                    "file": m["file"],
-                    "raga": m["raga"],
-                    "start": start
-                })
-                start += self.hop_frames
+            with open(self.index_cache, "w") as f:
+                json.dump(self.samples, f)
+            logger.info(f"\t--> Built and cached {len(self.samples)} snippets.")
+        
+        # --- Convert to .npy if requested ---
+        if convert_to_npy:
+            self._maybe_convert_to_npy()
+
+    def _maybe_convert_to_npy(self):
+        """Convert pitchSilIntrpPP -> npy (freqs only) for faster loading"""
+        logger.info("\t--> Checking for .npy cache files and converting if not available...")
+        for s in tqdm(self.samples):
+            base_path = os.path.join(self.base_dir, s["file"])
+            pitch_txt = base_path + ".pitchSilIntrpPP"
+            pitch_npy = base_path + ".freqs.npy"
+
+            if not os.path.exists(pitch_npy):
+                try:
+                    f0_data = np.loadtxt(pitch_txt)
+                    freqs = f0_data[:, 1]
+                    np.save(pitch_npy, freqs)
+                except Exception as e:
+                    logger.warning(f"\t--> Failed to convert {pitch_txt}: {e}")
+        logger.info("\t--> .npy conversion done.")
 
     def __len__(self):
         return len(self.samples)
@@ -89,8 +123,15 @@ class CarnaticPitchDataset(Dataset):
         pitch_file = base_path + ".pitchSilIntrpPP"
         tonic_file = base_path + ".tonicFine"
 
-        f0_data = np.loadtxt(pitch_file)
-        times, freqs = f0_data[:,0], f0_data[:,1]
+        # Prefer .npy, fallback to .txt
+        pitch_npy = base_path + ".freqs.npy"
+        pitch_txt = base_path + ".pitchSilIntrpPP"
+
+        if os.path.exists(pitch_npy):
+            freqs = np.load(pitch_npy, mmap_mode="r")
+        else:
+            f0_data = np.loadtxt(pitch_txt)
+            freqs = f0_data[:, 1]
 
         # --- Downsampling ---
         freqs = freqs[::self.downsample_factor]
@@ -107,7 +148,7 @@ class CarnaticPitchDataset(Dataset):
         start = entry["start"]
         seq = cents[start:start+self.snippet_frames]
 
-        # Shape = (1, 1, T) for CRNN
+        # Shape = (1, T) for Conv1d
         x = torch.tensor(seq, dtype=torch.float32).unsqueeze(0)
         y = self.raga2idx[entry["raga"]]
         return x, y
